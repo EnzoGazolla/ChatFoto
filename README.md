@@ -8,6 +8,7 @@ Professor: Nikson Bernardes Fernandes Ferreira
 - Enzo Gazolla Nagano, RA: 22401710
 - Rodrigo Silva Madeira Campos, RA: 22400645
 - Pedro Cezar Pires Henriques, RA: 22400985
+- Bernando Gontijo Campello, RA: 22452856
 
 # Chatfoto Bot
 

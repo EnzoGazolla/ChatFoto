@@ -33,11 +33,29 @@ import java.net.http.HttpResponse;
 
 import dev.langchain4j.data.message.SystemMessage;
 
+import dev.langchain4j.agent.tool.Tool;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.agent.tool.ToolSpecifications;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import javax.imageio.ImageIO;
+import com.pengrad.telegrambot.request.SendPhoto;
+
 public class Chatfoto {
 
     private final ChatMemory chatMemory;
     private final TelegramBot bot;
     private final GoogleAiGeminiChatModel model;
+    private final List<ToolSpecification> toolSpecs;
+    private final Map<Long, byte[]> lastPhotos = new ConcurrentHashMap<>();
+    private final ThreadLocal<Long> currentChatId = new ThreadLocal<>();
 
     // Flag para habilitar/desabilitar os logs
     private boolean showLog = true;
@@ -62,10 +80,12 @@ public class Chatfoto {
                 .maxMessages(10)
                 .build();
 
+        this.toolSpecs = ToolSpecifications.toolSpecificationsFrom(this);
+
         // Adiciona a instrução inicial na memória
         this.chatMemory.add(SystemMessage.from(
                 "Você é um assistente prestativo e bem-humorado rodando dentro de um bot do Telegram.\n" +
-                        "Sua principal função é descrever fotos.\n" +
+                        "Sua principal função é descrever, criar e editar fotos.\n" +
                         "Suas respostas devem ser concisas e amigáveis.\n" +
                         "Sempre que possível, use emojis para tornar a conversa mais leve."));
     }
@@ -95,20 +115,123 @@ public class Chatfoto {
             log("Recebendo nova mensagem de texto do chat " + chatId + ": " + text);
             this.chatMemory.add(UserMessage.from(text));
 
-            try {
-                // Gera a resposta diretamente usando a memória de contexto
-                dev.langchain4j.model.output.Response<AiMessage> response = model.generate(chatMemory.messages());
-                String aiResponse = response.content().text();
+            executeGenerateAndSend(chatId);
+        }
+    }
 
-                this.chatMemory.add(response.content());
-                bot.execute(new SendMessage(chatId, aiResponse));
+    private void executeGenerateAndSend(long chatId) {
+        currentChatId.set(chatId);
+        try {
+            dev.langchain4j.model.output.Response<AiMessage> response = model.generate(chatMemory.messages(), toolSpecs);
+            AiMessage aiMessage = response.content();
+            this.chatMemory.add(aiMessage);
+
+            String initialText = aiMessage.text();
+            if (initialText != null && !initialText.isEmpty()) {
+                bot.execute(new SendMessage(chatId, initialText));
                 log("Enviando resposta de texto para o chat " + chatId);
-            } catch (Exception e) {
-                log("Erro ao processar mensagem: " + e.getMessage());
-                e.printStackTrace();
-                bot.execute(new SendMessage(chatId, "Ops! 😵‍💫 Tive um erro: " + e.getMessage()));
-                log("Enviando mensagem de erro para o chat " + chatId);
             }
+
+            if (aiMessage.hasToolExecutionRequests()) {
+                for (ToolExecutionRequest toolReq : aiMessage.toolExecutionRequests()) {
+                    if ("transformPhotoToBlackAndWhite".equals(toolReq.name())) {
+                        log("Executando ferramenta: transformPhotoToBlackAndWhite");
+                        String result = transformPhotoToBlackAndWhite();
+                        this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
+                    } else if ("generateImage".equals(toolReq.name())) {
+                        log("Executando ferramenta: generateImage");
+                        try {
+                            @SuppressWarnings("unchecked")
+                            java.util.Map<String, Object> argsMap = dev.langchain4j.internal.Json.fromJson(toolReq.arguments(), java.util.Map.class);
+                            String prompt = (String) argsMap.values().iterator().next();
+                            String result = generateImage(prompt);
+                            this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
+                        } catch (Exception e) {
+                            this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, "Erro ao extrair prompt da ferramenta: " + e.getMessage()));
+                        }
+                    } else {
+                        this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, "Ferramenta não implementada."));
+                    }
+                }
+                response = model.generate(chatMemory.messages(), toolSpecs);
+                aiMessage = response.content();
+                this.chatMemory.add(aiMessage);
+
+                String finalText = aiMessage.text();
+                if (finalText != null && !finalText.isEmpty()) {
+                    bot.execute(new SendMessage(chatId, finalText));
+                    log("Enviando resposta final para o chat " + chatId);
+                }
+            }
+        } catch (Exception e) {
+            log("Erro ao processar mensagem com modelo: " + e.getMessage());
+            e.printStackTrace();
+            bot.execute(new SendMessage(chatId, "Ops! 😵‍💫 Tive um erro: " + e.getMessage()));
+        }
+    }
+
+    @Tool("Transforma a última foto recebida em preto e branco. Use esta ferramenta quando o usuário pedir para transformar a foto em preto e branco.")
+    public String transformPhotoToBlackAndWhite() {
+        Long chatId = currentChatId.get();
+        if (chatId == null) return "Erro: Chat ID não encontrado.";
+        
+        byte[] photoBytes = lastPhotos.get(chatId);
+        if (photoBytes == null) return "Nenhuma foto foi enviada ainda para transformar.";
+        
+        try {
+            BufferedImage img = ImageIO.read(new ByteArrayInputStream(photoBytes));
+            if (img == null) return "Erro ao ler a imagem.";
+            BufferedImage bwImg = new BufferedImage(img.getWidth(), img.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
+            Graphics2D graphics = bwImg.createGraphics();
+            graphics.drawImage(img, 0, 0, null);
+            graphics.dispose();
+            
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(bwImg, "jpg", baos);
+            
+            bot.execute(new SendPhoto(chatId, baos.toByteArray()));
+            simulatePayment(chatId);
+            return "Foto transformada e enviada com sucesso!";
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Erro ao transformar a foto: " + e.getMessage();
+        }
+    }
+
+    private void simulatePayment(long chatId) {
+        String randomPixKey = java.util.UUID.randomUUID().toString();
+        String paymentMessage = "Pagamento simulado! Para apoiar nosso projeto, faça um PIX para a seguinte chave aleatória:\n" + randomPixKey;
+        bot.execute(new SendMessage(chatId, paymentMessage));
+        log("Mensagem de cobrança PIX enviada para o chat " + chatId);
+    }
+
+    @Tool("Gera uma imagem do zero a partir de uma descrição de texto. Use esta ferramenta quando o usuário pedir para gerar, criar ou desenhar uma imagem.")
+    public String generateImage(String prompt) {
+        Long chatId = currentChatId.get();
+        if (chatId == null) return "Erro: Chat ID não encontrado.";
+        
+        try {
+            // Usando Pollinations.ai como alternativa gratuita e direta para geração de imagens
+            String encodedPrompt = java.net.URLEncoder.encode(prompt, "UTF-8");
+            String imageUrl = "https://image.pollinations.ai/prompt/" + encodedPrompt + "?width=1024&height=1024&nologo=true";
+            
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(imageUrl))
+                    .GET()
+                    .build();
+            HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            
+            if (response.statusCode() == 200) {
+                bot.execute(new SendPhoto(chatId, response.body()));
+                simulatePayment(chatId);
+                return "Imagem gerada e enviada com sucesso para o prompt: " + prompt;
+            } else {
+                return "Erro da API de geração de imagem. Status: " + response.statusCode();
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Erro interno ao gerar a imagem: " + e.getMessage();
         }
     }
 
@@ -148,6 +271,8 @@ public class Chatfoto {
                 log("Falha ao baixar foto. Enviando mensagem de erro para o chat " + chatId);
                 return;
             }
+            
+            lastPhotos.put(chatId, photoBytes);
 
             // 3. Converte para Base64
             String base64Image = Base64.getEncoder().encodeToString(photoBytes);
@@ -166,15 +291,7 @@ public class Chatfoto {
 
             // 5. Envia para o modelo processar todo o contexto (incluindo a imagem)
             log("Enviando imagem para análise do modelo Gemini...");
-            dev.langchain4j.model.output.Response<AiMessage> response = model.generate(chatMemory.messages());
-            String descricao = response.content().text();
-
-            // Adiciona a resposta do bot na memória
-            this.chatMemory.add(response.content());
-
-            // 6. Envia a resposta de volta para o usuário no Telegram
-            bot.execute(new SendMessage(chatId, descricao));
-            log("Enviando descrição da foto para o chat " + chatId);
+            executeGenerateAndSend(chatId);
         } catch (Exception e) {
             log("Erro ao processar foto: " + e.getMessage());
             e.printStackTrace();
