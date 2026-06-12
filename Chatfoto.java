@@ -4,6 +4,8 @@
 //DEPS dev.langchain4j:langchain4j:0.35.0
 //DEPS dev.langchain4j:langchain4j-google-ai-gemini:0.35.0
 //DEPS org.slf4j:slf4j-simple:2.0.12
+//DEPS com.google.zxing:core:3.5.3
+//DEPS com.google.zxing:javase:3.5.3
 
 import com.pengrad.telegrambot.TelegramBot;
 import com.pengrad.telegrambot.UpdatesListener;
@@ -48,6 +50,11 @@ import java.io.ByteArrayOutputStream;
 import javax.imageio.ImageIO;
 import com.pengrad.telegrambot.request.SendPhoto;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.client.j2se.MatrixToImageWriter;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
+
 public class Chatfoto {
 
     private final ChatMemory chatMemory;
@@ -86,7 +93,7 @@ public class Chatfoto {
         this.chatMemory.add(SystemMessage.from(
                 "Você é um assistente prestativo e bem-humorado rodando dentro de um bot do Telegram.\n" +
                         "Sua principal função é descrever, criar e editar fotos.\n" +
-                        "Suas respostas devem ser concisas e amigáveis.\n" +
+                        "Suas respostas devem ser concisas, amigáveis, objetivas e sucintas.\n" +
                         "Sempre que possível, use emojis para tornar a conversa mais leve."));
     }
 
@@ -122,7 +129,8 @@ public class Chatfoto {
     private void executeGenerateAndSend(long chatId) {
         currentChatId.set(chatId);
         try {
-            dev.langchain4j.model.output.Response<AiMessage> response = model.generate(chatMemory.messages(), toolSpecs);
+            dev.langchain4j.model.output.Response<AiMessage> response = model.generate(chatMemory.messages(),
+                    toolSpecs);
             AiMessage aiMessage = response.content();
             this.chatMemory.add(aiMessage);
 
@@ -142,12 +150,14 @@ public class Chatfoto {
                         log("Executando ferramenta: generateImage");
                         try {
                             @SuppressWarnings("unchecked")
-                            java.util.Map<String, Object> argsMap = dev.langchain4j.internal.Json.fromJson(toolReq.arguments(), java.util.Map.class);
+                            java.util.Map<String, Object> argsMap = dev.langchain4j.internal.Json
+                                    .fromJson(toolReq.arguments(), java.util.Map.class);
                             String prompt = (String) argsMap.values().iterator().next();
                             String result = generateImage(prompt);
                             this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
                         } catch (Exception e) {
-                            this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, "Erro ao extrair prompt da ferramenta: " + e.getMessage()));
+                            this.chatMemory.add(ToolExecutionResultMessage.from(toolReq,
+                                    "Erro ao extrair prompt da ferramenta: " + e.getMessage()));
                         }
                     } else {
                         this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, "Ferramenta não implementada."));
@@ -173,22 +183,25 @@ public class Chatfoto {
     @Tool("Transforma a última foto recebida em preto e branco. Use esta ferramenta quando o usuário pedir para transformar a foto em preto e branco.")
     public String transformPhotoToBlackAndWhite() {
         Long chatId = currentChatId.get();
-        if (chatId == null) return "Erro: Chat ID não encontrado.";
-        
+        if (chatId == null)
+            return "Erro: Chat ID não encontrado.";
+
         byte[] photoBytes = lastPhotos.get(chatId);
-        if (photoBytes == null) return "Nenhuma foto foi enviada ainda para transformar.";
-        
+        if (photoBytes == null)
+            return "Nenhuma foto foi enviada ainda para transformar.";
+
         try {
             BufferedImage img = ImageIO.read(new ByteArrayInputStream(photoBytes));
-            if (img == null) return "Erro ao ler a imagem.";
+            if (img == null)
+                return "Erro ao ler a imagem.";
             BufferedImage bwImg = new BufferedImage(img.getWidth(), img.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
             Graphics2D graphics = bwImg.createGraphics();
             graphics.drawImage(img, 0, 0, null);
             graphics.dispose();
-            
+
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(bwImg, "jpg", baos);
-            
+
             bot.execute(new SendPhoto(chatId, baos.toByteArray()));
             simulatePayment(chatId);
             return "Foto transformada e enviada com sucesso!";
@@ -200,28 +213,57 @@ public class Chatfoto {
 
     private void simulatePayment(long chatId) {
         String randomPixKey = java.util.UUID.randomUUID().toString();
-        String paymentMessage = "Pagamento simulado! Para apoiar nosso projeto, faça um PIX para a seguinte chave aleatória:\n" + randomPixKey;
-        bot.execute(new SendMessage(chatId, paymentMessage));
-        log("Mensagem de cobrança PIX enviada para o chat " + chatId);
+
+        try {
+            // Gera o QR Code para a chave PIX
+            byte[] qrCodeImage = generateQRCode(randomPixKey);
+
+            String paymentMessage = "Pagamento simulado! Para apoiar nosso projeto, você pode pagar via QR Code (imagem acima) ou usando a chave aleatória (Copia e Cola) abaixo:\n\n"
+                    + randomPixKey;
+
+            // Envia a imagem do QR Code com a legenda
+            SendPhoto sendPhoto = new SendPhoto(chatId, qrCodeImage).caption(paymentMessage);
+            bot.execute(sendPhoto);
+            log("QR Code e mensagem de cobrança PIX enviados para o chat " + chatId);
+
+        } catch (Exception e) {
+            log("Erro ao gerar QR Code: " + e.getMessage());
+            // Fallback caso falhe a geração do QR Code
+            String paymentMessage = "Pagamento simulado! Para apoiar nosso projeto, faça um PIX para a seguinte chave aleatória:\n"
+                    + randomPixKey;
+            bot.execute(new SendMessage(chatId, paymentMessage));
+        }
+    }
+
+    private byte[] generateQRCode(String text) throws Exception {
+        QRCodeWriter qrCodeWriter = new QRCodeWriter();
+        BitMatrix bitMatrix = qrCodeWriter.encode(text, BarcodeFormat.QR_CODE, 300, 300);
+
+        ByteArrayOutputStream pngOutputStream = new ByteArrayOutputStream();
+        MatrixToImageWriter.writeToStream(bitMatrix, "PNG", pngOutputStream);
+        return pngOutputStream.toByteArray();
     }
 
     @Tool("Gera uma imagem do zero a partir de uma descrição de texto. Use esta ferramenta quando o usuário pedir para gerar, criar ou desenhar uma imagem.")
     public String generateImage(String prompt) {
         Long chatId = currentChatId.get();
-        if (chatId == null) return "Erro: Chat ID não encontrado.";
-        
+        if (chatId == null)
+            return "Erro: Chat ID não encontrado.";
+
         try {
-            // Usando Pollinations.ai como alternativa gratuita e direta para geração de imagens
+            // Usando Pollinations.ai como alternativa gratuita e direta para geração de
+            // imagens
             String encodedPrompt = java.net.URLEncoder.encode(prompt, "UTF-8");
-            String imageUrl = "https://image.pollinations.ai/prompt/" + encodedPrompt + "?width=1024&height=1024&nologo=true";
-            
+            String imageUrl = "https://image.pollinations.ai/prompt/" + encodedPrompt
+                    + "?width=1024&height=1024&nologo=true";
+
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(imageUrl))
                     .GET()
                     .build();
             HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-            
+
             if (response.statusCode() == 200) {
                 bot.execute(new SendPhoto(chatId, response.body()));
                 simulatePayment(chatId);
@@ -271,7 +313,7 @@ public class Chatfoto {
                 log("Falha ao baixar foto. Enviando mensagem de erro para o chat " + chatId);
                 return;
             }
-            
+
             lastPhotos.put(chatId, photoBytes);
 
             // 3. Converte para Base64

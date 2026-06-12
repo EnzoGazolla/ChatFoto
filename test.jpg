@@ -1,1 +1,0 @@
-{"error":{"code":"gone","message":"This endpoint has been retired. Use /v1/chat/completions, /v1/images/generations, or /v1/messages — see https://api.airforce/docs/","type":"endpoint_gone"}}
