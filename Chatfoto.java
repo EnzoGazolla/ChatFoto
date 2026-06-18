@@ -77,7 +77,7 @@ public class Chatfoto {
         this.bot = new TelegramBot(botToken);
         this.model = GoogleAiGeminiChatModel.builder()
                 .apiKey(geminiKey)
-                .modelName("gemini-3.5-flash")
+                .modelName("gemini-2.5-flash")
                 .temperature(0.2) // Deixa o modelo menos "criativo" e mais factual (0.0 a 1.0)
                 .timeout(java.time.Duration.ofSeconds(60)) // Evita o erro de SocketTimeoutException
                 .build();
@@ -93,8 +93,11 @@ public class Chatfoto {
         this.chatMemory.add(SystemMessage.from(
                 "Você é um assistente prestativo e bem-humorado rodando dentro de um bot do Telegram.\n" +
                         "Sua principal função é descrever, criar e editar fotos.\n" +
-                        "Suas respostas devem ser concisas, amigáveis, objetivas e sucintas.\n" +
-                        "Sempre que possível, use emojis para tornar a conversa mais leve."));
+                        "Suas respostas devem ser concisas, amigáveis, objetivas, curtas e sucintas.\n" +
+                        "Sempre que possível, use emojis para tornar a conversa mais leve.\n" +
+                        "REGRA SOBRE EDIÇÃO DE FOTOS: Se o usuário pedir para alterar ou editar a foto enviada (ex: 'coloque ele no espaço'), use a ferramenta editarFotoEnviada. ATENÇÃO: crie um prompt em inglês MUITO DETALHADO descrevendo a aparência exata da foto original misturada com o novo cenário pedido.\n"
+                        +
+                        "REGRA SOBRE PAGAMENTO: Se você perguntar ao usuário sobre confirmar o pagamento e ele responder afirmativamente ('Sim', 'Confirmar', 'Pago', etc.), você deve responder comemorando com um 'Pagamento confirmado! Muito obrigado pelo apoio!'."));
     }
 
     public void start() {
@@ -146,14 +149,19 @@ public class Chatfoto {
                         log("Executando ferramenta: transformPhotoToBlackAndWhite");
                         String result = transformPhotoToBlackAndWhite();
                         this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
-                    } else if ("generateImage".equals(toolReq.name())) {
-                        log("Executando ferramenta: generateImage");
+                    } else if ("generateImage".equals(toolReq.name()) || "editarFotoEnviada".equals(toolReq.name())) {
+                        log("Executando ferramenta: " + toolReq.name());
                         try {
                             @SuppressWarnings("unchecked")
                             java.util.Map<String, Object> argsMap = dev.langchain4j.internal.Json
                                     .fromJson(toolReq.arguments(), java.util.Map.class);
                             String prompt = (String) argsMap.values().iterator().next();
-                            String result = generateImage(prompt);
+                            String result;
+                            if ("editarFotoEnviada".equals(toolReq.name())) {
+                                result = editarFotoEnviada(prompt);
+                            } else {
+                                result = generateImage(prompt);
+                            }
                             this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
                         } catch (Exception e) {
                             this.chatMemory.add(ToolExecutionResultMessage.from(toolReq,
@@ -202,9 +210,11 @@ public class Chatfoto {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(bwImg, "jpg", baos);
 
-            bot.execute(new SendPhoto(chatId, baos.toByteArray()));
+            byte[] newPhotoBytes = baos.toByteArray();
+            bot.execute(new SendPhoto(chatId, newPhotoBytes));
+            lastPhotos.put(chatId, newPhotoBytes);
             simulatePayment(chatId);
-            return "Foto transformada e enviada com sucesso!";
+            return "Foto transformada e enviada. O sistema já enviou o QR Code do PIX. Agora, encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
         } catch (Exception e) {
             e.printStackTrace();
             return "Erro ao transformar a foto: " + e.getMessage();
@@ -266,8 +276,10 @@ public class Chatfoto {
 
             if (response.statusCode() == 200) {
                 bot.execute(new SendPhoto(chatId, response.body()));
+                lastPhotos.put(chatId, response.body());
                 simulatePayment(chatId);
-                return "Imagem gerada e enviada com sucesso para o prompt: " + prompt;
+                return "Imagem gerada e enviada para o prompt: " + prompt
+                        + ". O sistema já enviou o QR Code do PIX. Agora, encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
             } else {
                 return "Erro da API de geração de imagem. Status: " + response.statusCode();
             }
@@ -275,6 +287,12 @@ public class Chatfoto {
             e.printStackTrace();
             return "Erro interno ao gerar a imagem: " + e.getMessage();
         }
+    }
+
+    @Tool("Edita a imagem que o usuário enviou, inserindo-a em um novo contexto. O parâmetro 'descricaoRica' DEVE ser uma descrição muito detalhada em inglês contendo a aparência física da foto original misturada com as alterações pedidas.")
+    public String editarFotoEnviada(String descricaoRica) {
+        log("Tool editarFotoEnviada acionada. Repassando prompt para geração: " + descricaoRica);
+        return generateImage(descricaoRica);
     }
 
     public static void main(String[] args) throws Exception {
