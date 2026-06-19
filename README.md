@@ -87,3 +87,5 @@ O arquivo `Chatfoto.java` contém:
 - Diretivas do jbang para Java 21 e dependências.
 - Interface `Assistant` usando LangChain4j para integração com Gemini.
 - Lógica do bot usando a API `java-telegram-bot-api`.
+
+*
