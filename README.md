@@ -61,7 +61,7 @@ export TELEGRAM_BOT_TOKEN="seu_token_aqui"
 export GEMINI_API_KEY="sua_chave_gemini_aqui"
 ```
 
-## Como Executar
+## Como Executar.
 
 Com o Java e o jbang instalados, você pode rodar o bot diretamente pelo terminal.
 
