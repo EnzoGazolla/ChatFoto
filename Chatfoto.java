@@ -62,6 +62,7 @@ public class Chatfoto {
     private final GoogleAiGeminiChatModel model;
     private final List<ToolSpecification> toolSpecs;
     private final Map<Long, byte[]> lastPhotos = new ConcurrentHashMap<>();
+    private final Map<Long, byte[]> fotosPendentes = new ConcurrentHashMap<>();
     private final ThreadLocal<Long> currentChatId = new ThreadLocal<>();
 
     // Flag para habilitar/desabilitar os logs
@@ -97,7 +98,7 @@ public class Chatfoto {
                         "Sempre que possível, use emojis para tornar a conversa mais leve.\n" +
                         "REGRA SOBRE EDIÇÃO DE FOTOS: Se o usuário pedir para alterar ou editar a foto enviada (ex: 'coloque ele no espaço'), use a ferramenta editarFotoEnviada. ATENÇÃO: crie um prompt em inglês MUITO DETALHADO descrevendo a aparência exata da foto original misturada com o novo cenário pedido.\n"
                         +
-                        "REGRA SOBRE PAGAMENTO: Se você perguntar ao usuário sobre confirmar o pagamento e ele responder afirmativamente ('Sim', 'Confirmar', 'Pago', etc.), você deve responder comemorando com um 'Pagamento confirmado! Muito obrigado pelo apoio!'."));
+                        "REGRA SOBRE PAGAMENTO: Se você perguntar ao usuário sobre confirmar o pagamento e ele responder afirmativamente ('Sim', 'Confirmar', 'Pago', etc.), você deve usar a ferramenta liberarFotoPaga para enviar a foto pronta e responder comemorando com um 'Pagamento confirmado! Muito obrigado pelo apoio!'."));
     }
 
     public void start() {
@@ -167,6 +168,10 @@ public class Chatfoto {
                             this.chatMemory.add(ToolExecutionResultMessage.from(toolReq,
                                     "Erro ao extrair prompt da ferramenta: " + e.getMessage()));
                         }
+                    } else if ("liberarFotoPaga".equals(toolReq.name())) {
+                        log("Executando ferramenta: liberarFotoPaga");
+                        String result = liberarFotoPaga();
+                        this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, result));
                     } else {
                         this.chatMemory.add(ToolExecutionResultMessage.from(toolReq, "Ferramenta não implementada."));
                     }
@@ -211,10 +216,9 @@ public class Chatfoto {
             ImageIO.write(bwImg, "jpg", baos);
 
             byte[] newPhotoBytes = baos.toByteArray();
-            bot.execute(new SendPhoto(chatId, newPhotoBytes));
-            lastPhotos.put(chatId, newPhotoBytes);
+            fotosPendentes.put(chatId, newPhotoBytes);
             simulatePayment(chatId);
-            return "Foto transformada e enviada. O sistema já enviou o QR Code do PIX. Agora, encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
+            return "Foto transformada e guardada no cofre. O sistema já enviou o QR Code do PIX. Agora, avise que a foto está pronta e encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
         } catch (Exception e) {
             e.printStackTrace();
             return "Erro ao transformar a foto: " + e.getMessage();
@@ -275,11 +279,10 @@ public class Chatfoto {
             HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
 
             if (response.statusCode() == 200) {
-                bot.execute(new SendPhoto(chatId, response.body()));
-                lastPhotos.put(chatId, response.body());
+                fotosPendentes.put(chatId, response.body());
                 simulatePayment(chatId);
-                return "Imagem gerada e enviada para o prompt: " + prompt
-                        + ". O sistema já enviou o QR Code do PIX. Agora, encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
+                return "Imagem gerada e guardada no cofre para o prompt: " + prompt
+                        + ". O sistema já enviou o QR Code do PIX. Agora, avise que a foto está pronta e encerre sua mensagem perguntando ao usuário: 'Confirmar pagamento?'";
             } else {
                 return "Erro da API de geração de imagem. Status: " + response.statusCode();
             }
@@ -293,6 +296,29 @@ public class Chatfoto {
     public String editarFotoEnviada(String descricaoRica) {
         log("Tool editarFotoEnviada acionada. Repassando prompt para geração: " + descricaoRica);
         return generateImage(descricaoRica);
+    }
+
+    @Tool("Libera a foto que estava no cofre aguardando pagamento. Use esta ferramenta logo após o usuário confirmar que pagou.")
+    public String liberarFotoPaga() {
+        Long chatId = currentChatId.get();
+        if (chatId == null)
+            return "Erro: Chat ID não encontrado.";
+
+        byte[] pendingPhoto = fotosPendentes.get(chatId);
+        if (pendingPhoto == null) {
+            return "Erro: Não há nenhuma foto aguardando pagamento para este chat.";
+        }
+
+        try {
+            bot.execute(new SendPhoto(chatId, pendingPhoto));
+            // Atualiza o lastPhotos para que a foto possa ser editada depois se desejado
+            lastPhotos.put(chatId, pendingPhoto);
+            fotosPendentes.remove(chatId);
+            return "Foto enviada com sucesso para o usuário!";
+        } catch (Exception e) {
+            log("Erro ao enviar foto liberada: " + e.getMessage());
+            return "Erro ao tentar enviar a foto: " + e.getMessage();
+        }
     }
 
     public static void main(String[] args) throws Exception {
